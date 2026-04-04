@@ -48,6 +48,7 @@ pyinstaller --onefile --windowed --name ARIA --collect-all customtkinter aria.py
 | "Tell me a joke" | Responds with personality 😄 |
 | "What files are in my Desktop?" | Runs `dir` and shows output |
 | Click the mic button and speak | ARIA listens, transcribes your speech, and replies out loud |
+| Say "Hey Aria" (wake-word mode on) | ARIA wakes up and starts listening automatically |
 
 ---
 
@@ -102,6 +103,9 @@ A: Yes! Just `pip install customtkinter` then `python aria.py`
 
 **Q: Does voice work on every platform?**  
 A: Voice input and spoken replies are currently enabled on Windows. The rest of the app still runs on macOS and Linux.
+
+**Q: How do I use wake-word mode?**  
+A: Turn on wake-word mode in Settings (or the 👂 button), then say "Hey Aria" to trigger voice listening.
 
 ---
 

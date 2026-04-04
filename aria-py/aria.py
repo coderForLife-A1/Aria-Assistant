@@ -15,6 +15,7 @@ import urllib.error
 import urllib.parse
 import re
 import platform
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -229,8 +230,11 @@ class ARIAApp(ctk.CTk):
         self.voice_reply_enabled = self.config_data.get("voice_reply_enabled", True)
         self.voice_input_enabled = self.config_data.get("voice_input_enabled", True)
         self.voice_supported = platform.system() == "Windows"
+        self.wake_word_enabled = self.config_data.get("wake_word_enabled", self.voice_supported)
         self.voice_status = "ready"
         self.voice_lock = threading.Lock()
+        self.wake_word_active = False
+        self.wake_word_thread = None
 
         self.title("ARIA")
         self.geometry("420x680")
@@ -241,11 +245,17 @@ class ARIAApp(ctk.CTk):
         # Remove default title bar on Windows for cleaner look
         if platform.system() == "Windows":
             self.overrideredirect(False)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_ui()
         self._show_chat()
         self._add_welcome()
+        self._apply_wake_word_state()
         threading.Thread(target=self._prepare_local_model, daemon=True).start()
+
+    def _on_close(self):
+        self.wake_word_active = False
+        self.destroy()
 
     def _prepare_local_model(self):
         try:
@@ -290,10 +300,15 @@ class ARIAApp(ctk.CTk):
                   text_color=COLORS["muted"], font=("Arial", 13),
                   command=self._toggle_voice_reply)
         self.voice_toggle_btn.pack(side="left", padx=2)
+        self.wake_word_btn = ctk.CTkButton(right, text="👂", width=30, height=30, corner_radius=8,
+              fg_color=COLORS["card"], hover_color=COLORS["border"],
+              text_color=COLORS["muted"], font=("Arial", 12),
+              command=self._toggle_wake_word)
+        self.wake_word_btn.pack(side="left", padx=2)
         ctk.CTkButton(right, text="✕", width=30, height=30, corner_radius=8,
                       fg_color=COLORS["card"], hover_color="#3a1010",
                       text_color=COLORS["muted"], font=("Arial", 13),
-                      command=self.quit).pack(side="left", padx=2)
+                  command=self._on_close).pack(side="left", padx=2)
 
         # Separator
         sep = ctk.CTkFrame(self, fg_color=COLORS["border"], height=1, corner_radius=0)
@@ -429,6 +444,12 @@ class ARIAApp(ctk.CTk):
             else:
                 self.voice_toggle_btn.configure(text="🔈", fg_color=COLORS["card"], text_color=COLORS["muted"])
 
+        if hasattr(self, "wake_word_btn"):
+            if self.voice_supported and self.wake_word_enabled:
+                self.wake_word_btn.configure(text="👂", fg_color=COLORS["accent2"], text_color="#ffffff")
+            else:
+                self.wake_word_btn.configure(text="👂", fg_color=COLORS["card"], text_color=COLORS["muted"])
+
         if hasattr(self, "mic_btn"):
             if self.voice_supported and self.voice_input_enabled and self.voice_status != "listening":
                 self.mic_btn.configure(state="normal", text="🎙", fg_color=COLORS["card"], text_color=COLORS["muted"])
@@ -438,6 +459,7 @@ class ARIAApp(ctk.CTk):
     def _persist_voice_config(self):
         self.config_data["voice_reply_enabled"] = self.voice_reply_enabled
         self.config_data["voice_input_enabled"] = self.voice_input_enabled
+        self.config_data["wake_word_enabled"] = self.wake_word_enabled
         save_config(self.config_data)
 
     def _toggle_voice_reply(self):
@@ -451,8 +473,94 @@ class ARIAApp(ctk.CTk):
 
     def _toggle_voice_input(self):
         self.voice_input_enabled = not self.voice_input_enabled
+        if not self.voice_input_enabled:
+            self.wake_word_enabled = False
+            self._stop_wake_word_listener()
         self._persist_voice_config()
+        self._apply_wake_word_state()
         self._refresh_voice_controls()
+
+    def _toggle_wake_word(self):
+        if not self.voice_supported:
+            self._add_error("Wake-word mode is currently available on Windows only.")
+            return
+        if not self.voice_input_enabled:
+            self._add_error("Enable voice input first to use wake-word mode.")
+            return
+
+        self.wake_word_enabled = not self.wake_word_enabled
+        self._persist_voice_config()
+        self._apply_wake_word_state()
+        self._refresh_voice_controls()
+
+        if self.wake_word_enabled:
+            self._set_status(" ● wake-word listening", COLORS["accent2"])
+        else:
+            self._set_status(" ● wake-word off", COLORS["muted"])
+
+    def _apply_wake_word_state(self):
+        if self.voice_supported and self.voice_input_enabled and self.wake_word_enabled:
+            self._start_wake_word_listener()
+        else:
+            self._stop_wake_word_listener()
+
+    def _start_wake_word_listener(self):
+        if self.wake_word_active:
+            return
+        self.wake_word_active = True
+        self.wake_word_thread = threading.Thread(target=self._wake_word_loop, daemon=True)
+        self.wake_word_thread.start()
+
+    def _stop_wake_word_listener(self):
+        self.wake_word_active = False
+
+    def _listen_for_wake_word(self):
+        self._init_voice_engine()
+        script = r"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Speech
+$engine = New-Object System.Speech.Recognition.SpeechRecognitionEngine
+$engine.SetInputToDefaultAudioDevice()
+$choices = New-Object System.Speech.Recognition.Choices
+$choices.Add('hey aria')
+$builder = New-Object System.Speech.Recognition.GrammarBuilder
+$builder.Append($choices)
+$grammar = New-Object System.Speech.Recognition.Grammar($builder)
+$engine.LoadGrammar($grammar)
+$result = $engine.Recognize([TimeSpan]::FromSeconds(4))
+if ($null -ne $result) {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    Write-Output $result.Text
+}
+"""
+        result = self._run_powershell(script, timeout=8)
+        if result.returncode != 0:
+            details = result.stderr.strip() or result.stdout.strip() or "Wake-word listener failed."
+            raise RuntimeError(details)
+        return result.stdout.strip().lower()
+
+    def _wake_word_loop(self):
+        while self.wake_word_active:
+            if not (self.voice_supported and self.voice_input_enabled and self.wake_word_enabled):
+                time.sleep(0.5)
+                continue
+
+            if self.thinking or self.voice_status == "listening":
+                time.sleep(0.4)
+                continue
+
+            try:
+                heard = self._listen_for_wake_word()
+            except Exception as e:
+                self.after(0, lambda err=str(e): self._add_error(f"Wake-word error: {err}"))
+                time.sleep(1.0)
+                continue
+
+            normalized = " ".join(heard.lower().strip().split())
+            if normalized == "hey aria":
+                self.after(0, lambda: self._set_status(" ● wake word detected", COLORS["accent2"]))
+                self.after(0, self._start_voice_capture)
+                time.sleep(1.0)
 
     def _init_voice_engine(self):
         if not self.voice_supported:
@@ -546,7 +654,10 @@ $synth.Speak($text)
     def _voice_capture_failed(self, message):
         self.voice_status = "ready"
         self._refresh_voice_controls()
-        self._set_status(" ● online", COLORS["success"])
+        if self.wake_word_enabled and self.voice_input_enabled and self.voice_supported:
+            self._set_status(" ● wake-word listening", COLORS["accent2"])
+        else:
+            self._set_status(" ● online", COLORS["success"])
         self._add_error(message)
 
     # ── Settings dialog ────────────────────────────────────────────────────
@@ -554,7 +665,7 @@ $synth.Speak($text)
     def _open_settings(self):
         dlg = ctk.CTkToplevel(self)
         dlg.title("Settings")
-        dlg.geometry("380x320")
+        dlg.geometry("380x370")
         dlg.configure(fg_color=COLORS["surface"])
         dlg.resizable(False, False)
         dlg.grab_set()
@@ -574,6 +685,7 @@ $synth.Speak($text)
         def refresh_voice_labels():
             voice_button.configure(text="Disable voice replies" if self.voice_reply_enabled else "Enable voice replies")
             mic_button.configure(text="Disable voice input" if self.voice_input_enabled else "Enable voice input")
+            wake_button.configure(text="Disable wake-word ('Hey Aria')" if self.wake_word_enabled else "Enable wake-word ('Hey Aria')")
 
         def toggle_voice_reply_and_refresh():
             self._toggle_voice_reply()
@@ -581,6 +693,11 @@ $synth.Speak($text)
 
         def toggle_voice_input_and_refresh():
             self._toggle_voice_input()
+            self._apply_wake_word_state()
+            refresh_voice_labels()
+
+        def toggle_wake_word_and_refresh():
+            self._toggle_wake_word()
             refresh_voice_labels()
 
         voice_button = ctk.CTkButton(dlg, text="", width=290, height=38,
@@ -589,6 +706,9 @@ $synth.Speak($text)
         mic_button = ctk.CTkButton(dlg, text="", width=290, height=38,
                                    fg_color=COLORS["card"], command=toggle_voice_input_and_refresh)
         mic_button.pack(padx=24, pady=2)
+        wake_button = ctk.CTkButton(dlg, text="", width=290, height=38,
+                        fg_color=COLORS["card"], command=toggle_wake_word_and_refresh)
+        wake_button.pack(padx=24, pady=2)
         refresh_voice_labels()
 
         def do_clear():
@@ -774,6 +894,9 @@ $synth.Speak($text)
 
         self.history.append({"role": "assistant", "content": reply})
         self._add_aria_msg(reply, action_result)
+
+        if self.wake_word_enabled and self.voice_input_enabled and self.voice_supported:
+            self._set_status(" ● wake-word listening", COLORS["accent2"])
 
         if self.voice_reply_enabled and reply:
             threading.Thread(target=self._speak_reply_worker, args=(reply,), daemon=True).start()
