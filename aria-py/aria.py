@@ -226,6 +226,11 @@ class ARIAApp(ctk.CTk):
         self.model_bootstrap_error = None
         self.history = []
         self.thinking = False
+        self.voice_reply_enabled = self.config_data.get("voice_reply_enabled", True)
+        self.voice_input_enabled = self.config_data.get("voice_input_enabled", True)
+        self.voice_supported = platform.system() == "Windows"
+        self.voice_status = "ready"
+        self.voice_lock = threading.Lock()
 
         self.title("ARIA")
         self.geometry("420x680")
@@ -280,6 +285,11 @@ class ARIAApp(ctk.CTk):
                       fg_color=COLORS["card"], hover_color=COLORS["border"],
                       text_color=COLORS["muted"], font=("Arial", 14),
                       command=self._open_settings).pack(side="left", padx=2)
+        self.voice_toggle_btn = ctk.CTkButton(right, text="🔊", width=30, height=30, corner_radius=8,
+                  fg_color=COLORS["card"], hover_color=COLORS["border"],
+                  text_color=COLORS["muted"], font=("Arial", 13),
+                  command=self._toggle_voice_reply)
+        self.voice_toggle_btn.pack(side="left", padx=2)
         ctk.CTkButton(right, text="✕", width=30, height=30, corner_radius=8,
                       fg_color=COLORS["card"], hover_color="#3a1010",
                       text_color=COLORS["muted"], font=("Arial", 13),
@@ -377,11 +387,18 @@ class ARIAApp(ctk.CTk):
         self.input_box.bind("<Return>", self._on_enter)
         self.input_box.bind("<Shift-Return>", lambda e: None)
 
+        self.mic_btn = ctk.CTkButton(input_inner, text="🎙", width=38, height=38,
+                          fg_color=COLORS["card"], hover_color=COLORS["border"],
+                          text_color=COLORS["muted"], font=("Arial", 14), corner_radius=10,
+                          command=self._start_voice_capture)
+        self.mic_btn.pack(side="right", padx=(0, 6), pady=4)
+
         self.send_btn = ctk.CTkButton(input_inner, text="➤", width=38, height=38,
                                        fg_color=COLORS["accent"], hover_color="#6a5de8",
                                        font=("Arial", 16), corner_radius=10,
                                        command=self._do_send)
         self.send_btn.pack(side="right", padx=6, pady=4)
+        self._refresh_voice_controls()
 
     # ── Screen switching ───────────────────────────────────────────────────
 
@@ -402,6 +419,136 @@ class ARIAApp(ctk.CTk):
         self.status_label.configure(text=" ● building local gemma...", text_color=COLORS["accent"])
         threading.Thread(target=self._prepare_local_model, daemon=True).start()
 
+    def _set_status(self, text, color):
+        self.status_label.configure(text=text, text_color=color)
+
+    def _refresh_voice_controls(self):
+        if hasattr(self, "voice_toggle_btn"):
+            if self.voice_reply_enabled:
+                self.voice_toggle_btn.configure(text="🔊", fg_color=COLORS["accent"], text_color="#ffffff")
+            else:
+                self.voice_toggle_btn.configure(text="🔈", fg_color=COLORS["card"], text_color=COLORS["muted"])
+
+        if hasattr(self, "mic_btn"):
+            if self.voice_supported and self.voice_input_enabled and self.voice_status != "listening":
+                self.mic_btn.configure(state="normal", text="🎙", fg_color=COLORS["card"], text_color=COLORS["muted"])
+            else:
+                self.mic_btn.configure(state="disabled", text="🎙", fg_color=COLORS["card"], text_color=COLORS["muted"])
+
+    def _persist_voice_config(self):
+        self.config_data["voice_reply_enabled"] = self.voice_reply_enabled
+        self.config_data["voice_input_enabled"] = self.voice_input_enabled
+        save_config(self.config_data)
+
+    def _toggle_voice_reply(self):
+        self.voice_reply_enabled = not self.voice_reply_enabled
+        self._persist_voice_config()
+        self._refresh_voice_controls()
+        if self.voice_reply_enabled:
+            self._set_status(" ● voice replies on", COLORS["success"])
+        else:
+            self._set_status(" ● voice replies off", COLORS["muted"])
+
+    def _toggle_voice_input(self):
+        self.voice_input_enabled = not self.voice_input_enabled
+        self._persist_voice_config()
+        self._refresh_voice_controls()
+
+    def _init_voice_engine(self):
+        if not self.voice_supported:
+            raise RuntimeError("Voice input and spoken replies are currently supported on Windows only.")
+
+    def _run_powershell(self, script, env=None, timeout=30):
+        powershell_cmd = "powershell"
+        result = subprocess.run(
+            [powershell_cmd, "-NoProfile", "-STA", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+        return result
+
+    def _listen_for_speech(self):
+        self._init_voice_engine()
+        script = r"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Speech
+$engine = New-Object System.Speech.Recognition.SpeechRecognitionEngine
+$engine.SetInputToDefaultAudioDevice()
+$grammar = New-Object System.Speech.Recognition.DictationGrammar
+$engine.LoadGrammar($grammar)
+$result = $engine.Recognize([TimeSpan]::FromSeconds(12))
+if ($null -ne $result) {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    Write-Output $result.Text
+}
+"""
+        result = self._run_powershell(script, timeout=20)
+        if result.returncode != 0:
+            details = result.stderr.strip() or result.stdout.strip() or "Voice capture failed."
+            raise RuntimeError(details)
+        return result.stdout.strip()
+
+    def _speak_text(self, text):
+        self._init_voice_engine()
+        text = (text or "").strip()
+        if not text:
+            return
+
+        text = text[:500]
+        env = os.environ.copy()
+        env["ARIA_TTS_TEXT"] = text
+        script = r"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Speech
+$text = $env:ARIA_TTS_TEXT
+if ([string]::IsNullOrWhiteSpace($text)) { return }
+$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$synth.Rate = 0
+$synth.Volume = 100
+$synth.Speak($text)
+"""
+        result = self._run_powershell(script, env=env, timeout=30)
+        if result.returncode != 0:
+            details = result.stderr.strip() or result.stdout.strip() or "Text to speech failed."
+            raise RuntimeError(details)
+
+    def _start_voice_capture(self):
+        if self.thinking:
+            return
+
+        if not self.voice_supported or not self.voice_input_enabled:
+            self._add_error("Voice input is not available on this platform.")
+            return
+
+        with self.voice_lock:
+            if self.voice_status == "listening":
+                return
+            self.voice_status = "listening"
+
+        self._set_status(" ● listening...", COLORS["accent2"])
+        self.mic_btn.configure(state="disabled")
+        threading.Thread(target=self._voice_capture_worker, daemon=True).start()
+
+    def _voice_capture_worker(self):
+        try:
+            spoken_text = self._listen_for_speech()
+            if not spoken_text:
+                raise RuntimeError("I did not catch anything. Try again.")
+            self.voice_status = "ready"
+            self.after(0, self._refresh_voice_controls)
+            self.after(0, lambda: self._set_status(" ● thinking...", COLORS["accent"]))
+            self.after(0, lambda t=spoken_text: self._send(t))
+        except Exception as e:
+            self.after(0, lambda: self._voice_capture_failed(str(e)))
+
+    def _voice_capture_failed(self, message):
+        self.voice_status = "ready"
+        self._refresh_voice_controls()
+        self._set_status(" ● online", COLORS["success"])
+        self._add_error(message)
+
     # ── Settings dialog ────────────────────────────────────────────────────
 
     def _open_settings(self):
@@ -421,6 +568,28 @@ class ARIAApp(ctk.CTk):
                      text_color=COLORS["muted"]).pack(anchor="w", padx=24)
         ctk.CTkLabel(dlg, text="No API key needed. ARIA uses local Ollama + Gemma.",
                      font=("Arial", 11), text_color=COLORS["muted"]).pack(anchor="w", padx=24, pady=(8,14))
+        ctk.CTkLabel(dlg, text=f"Voice: {'Windows speech enabled' if self.voice_supported else 'Unavailable on this platform'}",
+                     font=("Arial", 11), text_color=COLORS["muted"]).pack(anchor="w", padx=24, pady=(0,10))
+
+        def refresh_voice_labels():
+            voice_button.configure(text="Disable voice replies" if self.voice_reply_enabled else "Enable voice replies")
+            mic_button.configure(text="Disable voice input" if self.voice_input_enabled else "Enable voice input")
+
+        def toggle_voice_reply_and_refresh():
+            self._toggle_voice_reply()
+            refresh_voice_labels()
+
+        def toggle_voice_input_and_refresh():
+            self._toggle_voice_input()
+            refresh_voice_labels()
+
+        voice_button = ctk.CTkButton(dlg, text="", width=290, height=38,
+                                     fg_color=COLORS["card"], command=toggle_voice_reply_and_refresh)
+        voice_button.pack(padx=24, pady=2)
+        mic_button = ctk.CTkButton(dlg, text="", width=290, height=38,
+                                   fg_color=COLORS["card"], command=toggle_voice_input_and_refresh)
+        mic_button.pack(padx=24, pady=2)
+        refresh_voice_labels()
 
         def do_clear():
             self.history.clear()
@@ -587,11 +756,11 @@ class ARIAApp(ctk.CTk):
         self.send_btn.configure(state="normal")
 
         if error:
-            self.status_label.configure(text=" ● local model unavailable", text_color=COLORS["error"])
+            self._set_status(" ● local model unavailable", COLORS["error"])
             self._add_error(error)
             return
 
-        self.status_label.configure(text=" ● local gemma ready", text_color=COLORS["success"])
+        self._set_status(" ● local gemma ready", COLORS["success"])
 
         # Parse action
         action_result = None
@@ -600,9 +769,20 @@ class ARIAApp(ctk.CTk):
             action_tag = action_match.group(0).strip()
             action_result = execute_action(action_tag)
             reply = reply[len(action_match.group(0)):].strip()
+            if not reply and action_result:
+                reply = "Done."
 
         self.history.append({"role": "assistant", "content": reply})
         self._add_aria_msg(reply, action_result)
+
+        if self.voice_reply_enabled and reply:
+            threading.Thread(target=self._speak_reply_worker, args=(reply,), daemon=True).start()
+
+    def _speak_reply_worker(self, text):
+        try:
+            self._speak_text(text)
+        except Exception as e:
+            self.after(0, lambda: self._add_error(f"Voice reply failed: {e}"))
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
