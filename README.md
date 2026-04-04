@@ -1,0 +1,103 @@
+# 🤖 ARIA — AI Companion Desktop App
+### Build your own `.exe` in 2 minutes, no Node.js needed!
+
+---
+
+## ⚡ Quickest Way: Build ARIA.exe on Windows
+
+**Requirements:** Python 3.10+ from [python.org](https://python.org) *(free, 5min install)*
+
+1. Extract this folder anywhere
+2. Double-click **`build_windows.bat`**
+3. Wait ~60 seconds → `dist/ARIA.exe` appears
+4. **Double-click `ARIA.exe` — done! No install needed.**
+
+> On first run, Windows may show a security warning. Click "More info" → "Run anyway" (it's safe — you built it yourself).
+
+---
+
+## 🍎 macOS
+
+```bash
+chmod +x build_mac.sh
+./build_mac.sh
+# → dist/ARIA launches directly
+```
+
+---
+
+## 🐧 Linux
+
+```bash
+pip3 install customtkinter pyinstaller
+pyinstaller --onefile --windowed --name ARIA --collect-all customtkinter aria.py
+./dist/ARIA
+```
+
+---
+
+## 💬 What ARIA Can Do
+
+| Say this | ARIA does this |
+|---|---|
+| "Open my Downloads folder" | Opens Downloads in Explorer |
+| "Open YouTube" | Opens in your browser |
+| "Launch Notepad" | Starts Notepad |
+| "Search for Python tutorials" | Google search opens |
+| "Open the calculator" | Launches Calculator |
+| "Tell me a joke" | Responds with personality 😄 |
+| "What files are in my Desktop?" | Runs `dir` and shows output |
+
+---
+
+## 🖥️ Local Model Setup
+
+ARIA is now wired directly to local Ollama + Gemma and does not require any cloud API key.
+
+Use the model files already included in this folder:
+- `Modelfile` or `Modelfile.txt`
+- `gemma-4-E4B-it-Q4_K_M.gguf`
+
+One-time local setup:
+1. Install Ollama: https://ollama.com/download
+2. Keep these two files in the same folder as `aria.py` (or next to `ARIA.exe`):
+	- `Modelfile` or `Modelfile.txt`
+	- `gemma-4-E4B-it-Q4_K_M.gguf`
+3. Start Ollama service (if not already running):
+
+```bash
+ollama serve
+```
+
+4. Launch ARIA. It will auto-create model `aria-gemma` from your Modelfile if it is not already present.
+
+Optional manual create (same result):
+
+```bash
+ollama create aria-gemma -f Modelfile.txt
+```
+
+After that, ARIA will call your local model name `aria-gemma` at `http://127.0.0.1:11434` automatically.
+
+---
+
+## 🔒 Privacy
+- Your model, configuration, and conversations stay **100% on your machine**
+- No telemetry, no analytics, no tracking
+
+---
+
+## ❓ FAQ
+
+**Q: Windows blocked the exe?**  
+A: Right-click → Properties → Unblock, or click "More info" → "Run anyway" in the SmartScreen dialog.
+
+**Q: Python install failed?**  
+A: Make sure you checked **"Add Python to PATH"** during Python installation.
+
+**Q: Can I run aria.py directly without building?**  
+A: Yes! Just `pip install customtkinter` then `python aria.py`
+
+---
+
+*ARIA now runs against your local Gemma model via Ollama, with no API key required.*

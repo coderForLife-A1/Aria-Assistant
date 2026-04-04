@@ -1,0 +1,122 @@
+# ==========================================================
+# Global ignores for ARIA codebase (current + future integrations)
+# ==========================================================
+
+# ---------- OS / editor noise ----------
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# VS Code local workspace files (keep shareable recommendations if added)
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+*.pyo
+
+# Python environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Python tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# ---------- Build / packaging artifacts ----------
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# PyInstaller output folders and temp files
+*.manifest
+*.tmp
+
+# ---------- Logs / runtime files ----------
+*.log
+logs/
+*.pid
+*.out
+*.err
+
+# ---------- Secrets / local config ----------
+.env
+.env.*
+!.env.example
+*.secret
+*.secrets
+*.token
+*.pem
+*.key
+*credentials*.json
+
+# ---------- Databases / local state ----------
+*.db
+*.sqlite
+*.sqlite3
+
+# ---------- AI/LLM local artifacts ----------
+# Local model weights and checkpoints should not be committed
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.tflite
+*.mar
+
+# Common model/cache directories for future integrations
+models/
+weights/
+checkpoints/
+artifacts/
+cache/
+.cache/
+.huggingface/
+.transformers/
+
+# Ollama / local model helper files
+Modelfile.local
+Modelfile.*.local
+
+# ---------- Node / JS integrations (future-proof) ----------
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+.next/
+.nuxt/
+.svelte-kit/
+coverage/
+
+# ---------- Temporary files ----------
+tmp/
+temp/
+*.bak
+*.orig
+
+# ---------- Keep useful docs/samples tracked ----------
+# Keep canonical Modelfile in repo when needed.
+!Modelfile
+!Modelfile.txt
