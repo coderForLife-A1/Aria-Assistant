@@ -47,6 +47,7 @@ pyinstaller --onefile --windowed --name ARIA --collect-all customtkinter aria.py
 | "Open the calculator" | Launches Calculator |
 | "Tell me a joke" | Responds with personality 😄 |
 | "What files are in my Desktop?" | Runs `dir` and shows output |
+| Click the mic button and speak | ARIA listens, transcribes your speech, and replies out loud |
 
 ---
 
@@ -84,6 +85,7 @@ After that, ARIA will call your local model name `aria-gemma` at `http://127.0.0
 ## 🔒 Privacy
 - Your model, configuration, and conversations stay **100% on your machine**
 - No telemetry, no analytics, no tracking
+- Voice input and spoken replies use the built-in Windows speech engine on Windows, so they stay local too
 
 ---
 
@@ -97,6 +99,9 @@ A: Make sure you checked **"Add Python to PATH"** during Python installation.
 
 **Q: Can I run aria.py directly without building?**  
 A: Yes! Just `pip install customtkinter` then `python aria.py`
+
+**Q: Does voice work on every platform?**  
+A: Voice input and spoken replies are currently enabled on Windows. The rest of the app still runs on macOS and Linux.
 
 ---
 
