@@ -131,13 +131,16 @@ def ensure_ollama_model():
 
 def call_gemma_local(history):
     """Call local Gemma through Ollama chat API."""
+    cpu_threads = max(1, (os.cpu_count() or 4))
     body = json.dumps({
         "model": OLLAMA_MODEL_NAME,
         "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + history,
         "stream": False,
+        "keep_alive": "30m",
         "options": {
             "temperature": 0.7,
             "num_predict": 1000,
+            "num_thread": cpu_threads,
         },
     }).encode()
 
@@ -155,6 +158,54 @@ def call_gemma_local(history):
     if "error" in data:
         raise RuntimeError(data["error"])
     raise RuntimeError(f"Unexpected Ollama response: {data}")
+
+
+def call_gemma_local_stream(history, on_chunk):
+    """Call local Gemma through Ollama chat API with streamed chunks."""
+    cpu_threads = max(1, (os.cpu_count() or 4))
+    body = json.dumps({
+        "model": OLLAMA_MODEL_NAME,
+        "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + history,
+        "stream": True,
+        "keep_alive": "30m",
+        "options": {
+            "temperature": 0.7,
+            "num_predict": 1000,
+            "num_thread": cpu_threads,
+        },
+    }).encode()
+
+    req = urllib.request.Request(
+        OLLAMA_API_URL,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+
+    full_text = ""
+    with urllib.request.urlopen(req, timeout=180) as resp:
+        for raw_line in resp:
+            line = raw_line.decode("utf-8", errors="ignore").strip()
+            if not line:
+                continue
+            if getattr(on_chunk, "should_stop", None) and on_chunk.should_stop():
+                break
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if "error" in data:
+                raise RuntimeError(data["error"])
+
+            piece = data.get("message", {}).get("content", "")
+            if piece:
+                full_text += piece
+                on_chunk(full_text)
+
+    if not full_text:
+        raise RuntimeError("Empty response from Ollama.")
+    return full_text
 
 # ── System Actions ────────────────────────────────────────────────────────────
 
@@ -216,6 +267,47 @@ def execute_action(action_str):
 
     return None
 
+
+def sanitize_text_for_speech(text):
+    if not text:
+        return ""
+
+    # Convert markdown links to visible text and drop URL noise.
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", text)
+
+    # Remove fenced code markers and inline code ticks.
+    text = text.replace("```", " ")
+    text = text.replace("`", "")
+
+    # Remove heading/bullet/list prefixes so they are not read aloud.
+    text = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", text)
+    text = re.sub(r"(?m)^\s*[-*+]\s+", "", text)
+    text = re.sub(r"(?m)^\s*\d+\.\s+", "", text)
+
+    # Remove common markdown emphasis/control symbols.
+    text = text.replace("**", "")
+    text = text.replace("__", "")
+    text = text.replace("*", "")
+    text = text.replace("_", " ")
+
+    # Remove common emoji and pictograph ranges so TTS does not read icon names.
+    text = re.sub(r"[\U0001F300-\U0001FAFF\U00002700-\U000027BF\U0001F1E6-\U0001F1FF]", "", text)
+    text = text.replace("\uFE0F", "")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def strip_leading_action_for_display(text):
+    """Hide action tags while streaming so the user only sees natural language."""
+    if not text:
+        return ""
+    if text.startswith("[ACTION:"):
+        close_index = text.find("]")
+        if close_index == -1:
+            return ""
+        return text[close_index + 1:].lstrip()
+    return text
+
 # ── Main App ──────────────────────────────────────────────────────────────────
 
 class ARIAApp(ctk.CTk):
@@ -235,6 +327,10 @@ class ARIAApp(ctk.CTk):
         self.voice_lock = threading.Lock()
         self.wake_word_active = False
         self.wake_word_thread = None
+        self.model_warmed = False
+        self.stream_raw_text = ""
+        self.stream_active = False
+        self.stream_cancel_requested = False
 
         self.title("ARIA")
         self.geometry("420x680")
@@ -246,6 +342,7 @@ class ARIAApp(ctk.CTk):
         if platform.system() == "Windows":
             self.overrideredirect(False)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind("<Escape>", self._on_escape)
 
         self._build_ui()
         self._show_chat()
@@ -257,15 +354,55 @@ class ARIAApp(ctk.CTk):
         self.wake_word_active = False
         self.destroy()
 
+    def _on_escape(self, event=None):
+        if self.stream_active:
+            self._stop_streaming_response()
+            return "break"
+        return None
+
     def _prepare_local_model(self):
         try:
             ensure_ollama_model()
             self.modelfile_path = find_modelfile_path()
             self.ollama_ready = True
             self.after(0, lambda: self.status_label.configure(text=" ● local gemma ready", text_color=COLORS["success"]))
+            threading.Thread(target=self._warm_model_once, daemon=True).start()
         except Exception as e:
             self.model_bootstrap_error = str(e)
             self.after(0, lambda: self.status_label.configure(text=" ● local model unavailable", text_color=COLORS["error"]))
+
+    def _warm_model_once(self):
+        if self.model_warmed or not self.ollama_ready:
+            return
+        try:
+            # Small one-time warmup to reduce first real response latency.
+            body = json.dumps({
+                "model": OLLAMA_MODEL_NAME,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": "Respond with exactly: ready"},
+                ],
+                "stream": False,
+                "keep_alive": "30m",
+                "options": {
+                    "temperature": 0.0,
+                    "num_predict": 8,
+                    "num_thread": max(1, (os.cpu_count() or 4)),
+                },
+            }).encode()
+
+            req = urllib.request.Request(
+                OLLAMA_API_URL,
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=60):
+                pass
+            self.model_warmed = True
+        except Exception:
+            # Ignore warmup failures; normal chat still works.
+            return
 
     # ── UI Builder ─────────────────────────────────────────────────────────
 
@@ -292,22 +429,27 @@ class ARIAApp(ctk.CTk):
         right.pack(side="right", fill="y")
 
         ctk.CTkButton(right, text="⚙", width=30, height=30, corner_radius=8,
-                      fg_color=COLORS["card"], hover_color=COLORS["border"],
-                      text_color=COLORS["muted"], font=("Arial", 14),
-                      command=self._open_settings).pack(side="left", padx=2)
-        self.voice_toggle_btn = ctk.CTkButton(right, text="🔊", width=30, height=30, corner_radius=8,
                   fg_color=COLORS["card"], hover_color=COLORS["border"],
-                  text_color=COLORS["muted"], font=("Arial", 13),
-                  command=self._toggle_voice_reply)
+                  text_color=COLORS["muted"], font=("Arial", 14),
+                  command=self._open_settings).pack(side="left", padx=2)
+        self.voice_toggle_btn = ctk.CTkButton(right, text="🔊", width=30, height=30, corner_radius=8,
+                              fg_color=COLORS["card"], hover_color=COLORS["border"],
+                              text_color=COLORS["muted"], font=("Arial", 13),
+                              command=self._toggle_voice_reply)
         self.voice_toggle_btn.pack(side="left", padx=2)
         self.wake_word_btn = ctk.CTkButton(right, text="👂", width=30, height=30, corner_radius=8,
-              fg_color=COLORS["card"], hover_color=COLORS["border"],
-              text_color=COLORS["muted"], font=("Arial", 12),
-              command=self._toggle_wake_word)
+                            fg_color=COLORS["card"], hover_color=COLORS["border"],
+                            text_color=COLORS["muted"], font=("Arial", 12),
+                            command=self._toggle_wake_word)
         self.wake_word_btn.pack(side="left", padx=2)
+        self.stop_btn = ctk.CTkButton(right, text="⏹", width=30, height=30, corner_radius=8,
+                          fg_color=COLORS["card"], hover_color=COLORS["border"],
+                          text_color=COLORS["muted"], font=("Arial", 12),
+                          command=self._stop_streaming_response)
+        self.stop_btn.pack(side="left", padx=2)
         ctk.CTkButton(right, text="✕", width=30, height=30, corner_radius=8,
-                      fg_color=COLORS["card"], hover_color="#3a1010",
-                      text_color=COLORS["muted"], font=("Arial", 13),
+                  fg_color=COLORS["card"], hover_color="#3a1010",
+                  text_color=COLORS["muted"], font=("Arial", 13),
                   command=self._on_close).pack(side="left", padx=2)
 
         # Separator
@@ -430,6 +572,7 @@ class ARIAApp(ctk.CTk):
 
     def _rebuild_local_model(self):
         self.ollama_ready = False
+        self.model_warmed = False
         self.model_bootstrap_error = None
         self.status_label.configure(text=" ● building local gemma...", text_color=COLORS["accent"])
         threading.Thread(target=self._prepare_local_model, daemon=True).start()
@@ -455,6 +598,12 @@ class ARIAApp(ctk.CTk):
                 self.mic_btn.configure(state="normal", text="🎙", fg_color=COLORS["card"], text_color=COLORS["muted"])
             else:
                 self.mic_btn.configure(state="disabled", text="🎙", fg_color=COLORS["card"], text_color=COLORS["muted"])
+
+        if hasattr(self, "stop_btn"):
+            if self.stream_active:
+                self.stop_btn.configure(state="normal", fg_color=COLORS["error"], text_color="#ffffff")
+            else:
+                self.stop_btn.configure(state="disabled", fg_color=COLORS["card"], text_color=COLORS["muted"])
 
     def _persist_voice_config(self):
         self.config_data["voice_reply_enabled"] = self.voice_reply_enabled
@@ -600,7 +749,7 @@ if ($null -ne $result) {
 
     def _speak_text(self, text):
         self._init_voice_engine()
-        text = (text or "").strip()
+        text = sanitize_text_for_speech((text or "").strip())
         if not text:
             return
 
@@ -638,6 +787,15 @@ $synth.Speak($text)
         self._set_status(" ● listening...", COLORS["accent2"])
         self.mic_btn.configure(state="disabled")
         threading.Thread(target=self._voice_capture_worker, daemon=True).start()
+
+    def _stop_streaming_response(self):
+        if not self.stream_active:
+            return
+        self.stream_cancel_requested = True
+        self._set_status(" ● stopping...", COLORS["muted"])
+
+    def _stream_should_stop(self):
+        return self.stream_cancel_requested
 
     def _voice_capture_worker(self):
         try:
@@ -812,6 +970,21 @@ $synth.Speak($text)
         self._scroll_bottom()
         return outer
 
+    def _update_stream_text(self, full_text):
+        self.stream_raw_text = full_text
+        shown_text = strip_leading_action_for_display(full_text)
+        if shown_text:
+            self._set_status(" ● responding...", COLORS["accent"])
+        if hasattr(self, "typing_label") and self.typing_label.winfo_exists():
+            self.typing_label.configure(
+                text=shown_text or "● ● ●",
+                font=("Arial", 13),
+                text_color=COLORS["text"],
+                wraplength=300,
+                justify="left"
+            )
+            self._scroll_bottom()
+
     def _add_error(self, msg):
         outer = ctk.CTkFrame(self.msg_scroll, fg_color="#1a0f0f",
                               corner_radius=10, border_width=1,
@@ -844,8 +1017,11 @@ $synth.Speak($text)
         self._add_user_msg(text)
         self.history.append({"role": "user", "content": text})
         self.thinking = True
+        self.stream_active = True
+        self.stream_cancel_requested = False
         self.send_btn.configure(state="disabled")
         self.status_label.configure(text=" ● thinking...", text_color=COLORS["accent"])
+        self._refresh_voice_controls()
 
         typing_el = self._add_typing()
         threading.Thread(target=self._worker, args=(typing_el,), daemon=True).start()
@@ -855,7 +1031,17 @@ $synth.Speak($text)
             if not self.ollama_ready:
                 ensure_ollama_model()
                 self.ollama_ready = True
-            reply = call_gemma_local(self.history)
+            self.stream_raw_text = ""
+            def on_chunk(full_text):
+                self.after(0, lambda t=full_text: self._update_stream_text(t))
+
+            on_chunk.should_stop = self._stream_should_stop
+            reply = call_gemma_local_stream(
+                self.history,
+                on_chunk
+            )
+            if self.stream_cancel_requested:
+                reply = None
         except urllib.error.HTTPError as e:
             body = e.read().decode()
             try:
@@ -873,11 +1059,18 @@ $synth.Speak($text)
     def _finish(self, typing_el, reply, error=None):
         typing_el.destroy()
         self.thinking = False
+        self.stream_active = False
+        self.stream_cancel_requested = False
         self.send_btn.configure(state="normal")
+        self._refresh_voice_controls()
 
         if error:
             self._set_status(" ● local model unavailable", COLORS["error"])
             self._add_error(error)
+            return
+
+        if reply is None:
+            self._set_status(" ● online", COLORS["success"])
             return
 
         self._set_status(" ● local gemma ready", COLORS["success"])
