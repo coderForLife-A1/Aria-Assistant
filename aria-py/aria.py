@@ -583,25 +583,11 @@ class ARIAApp(ctk.CTk):
                   fg_color=COLORS["card"], hover_color=COLORS["border"],
                   text_color=COLORS["muted"], font=("Arial", 14),
                   command=self._open_settings).pack(side="left", padx=2)
-        self.voice_toggle_btn = ctk.CTkButton(right, text="🔊", width=30, height=30, corner_radius=8,
-                              fg_color=COLORS["card"], hover_color=COLORS["border"],
-                              text_color=COLORS["muted"], font=("Arial", 13),
-                              command=self._toggle_voice_reply)
-        self.voice_toggle_btn.pack(side="left", padx=2)
-        self.wake_word_btn = ctk.CTkButton(right, text="👂", width=30, height=30, corner_radius=8,
-                            fg_color=COLORS["card"], hover_color=COLORS["border"],
-                            text_color=COLORS["muted"], font=("Arial", 12),
-                            command=self._toggle_wake_word)
-        self.wake_word_btn.pack(side="left", padx=2)
         self.stop_btn = ctk.CTkButton(right, text="⏹", width=30, height=30, corner_radius=8,
                           fg_color=COLORS["card"], hover_color=COLORS["border"],
                           text_color=COLORS["muted"], font=("Arial", 12),
                           command=self._stop_streaming_response)
         self.stop_btn.pack(side="left", padx=2)
-        ctk.CTkButton(right, text="✕", width=30, height=30, corner_radius=8,
-                  fg_color=COLORS["card"], hover_color="#3a1010",
-                  text_color=COLORS["muted"], font=("Arial", 13),
-                  command=self._on_close).pack(side="left", padx=2)
 
         # Separator
         sep = ctk.CTkFrame(self, fg_color=COLORS["border"], height=1, corner_radius=0)
