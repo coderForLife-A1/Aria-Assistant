@@ -22,7 +22,7 @@ from datetime import datetime
 # ── Config ────────────────────────────────────────────────────────────────────
 APP_NAME = "ARIA"
 OLLAMA_API_URL = "http://127.0.0.1:11434/api/chat"
-OLLAMA_MODEL_NAME = "aria-gemma"
+OLLAMA_MODEL_NAME = "aria-qwen-coder"
 CONFIG_FILE = Path.home() / ".aria_config.json"
 
 ctk.set_appearance_mode("dark")
@@ -44,32 +44,36 @@ COLORS = {
     "user_text":  "#d4cfff",
 }
 
-SYSTEM_PROMPT = f"""You are ARIA (Adaptive Reasoning & Intelligence Assistant), a warm, witty, and genuinely helpful AI companion running locally on the user's computer.
+SYSTEM_PROMPT = f"""You are ARIA (Adaptive Reasoning & Intelligence Assistant) running locally on the user's computer.
 
 System: Platform={platform.system()}, User={os.getlogin() if hasattr(os, 'getlogin') else 'User'}, Home={Path.home()}
 
-You can perform REAL system actions. When the user wants to open something, respond with an action tag FIRST, then your message.
+You MUST output strict JSON only. No markdown, no prose outside JSON, no code fences.
 
-Action format (put at the very START of your response):
-[ACTION:open_url:https://...]
-[ACTION:open_file:/path/to/file]
-[ACTION:open_folder:/path/to/folder]  
-[ACTION:open_app:appname]
-[ACTION:run_cmd:shell command]
-[ACTION:search:search query]
+Allowed action types:
+- none
+- open_url
+- open_file
+- open_folder
+- open_app
+- run_cmd
+- search
 
-Platform-specific app commands:
-- Windows: notepad, calc, mspaint, explorer, chrome, code
-- Mac: open -a "App Name"
-- Linux: gedit, gnome-calculator, nautilus, code
+Response schema (exact keys required):
+{{
+    "reply": "string",
+    "action": {{
+        "type": "none|open_url|open_file|open_folder|open_app|run_cmd|search",
+        "value": "string"
+    }}
+}}
 
 Rules:
-- Be warm, conversational, and friendly — like a smart best friend
-- Use light humor when appropriate
-- Always confirm what action you're doing naturally in your reply
-- For the home/downloads folder: use the actual path from system info above
-- NEVER be robotic. You have real personality!
-- Keep responses concise but never cold"""
+- Always return valid JSON matching the schema above.
+- If no system action is needed, set action.type to "none" and action.value to "".
+- Keep reply concise and helpful.
+- For file paths, use real platform-appropriate absolute paths when possible.
+"""
 
 # ── Config I/O ────────────────────────────────────────────────────────────────
 
@@ -84,7 +88,7 @@ def load_config():
 def save_config(data):
     CONFIG_FILE.write_text(json.dumps(data, indent=2))
 
-# ── Local Gemma (Ollama) ─────────────────────────────────────────────────────
+# ── Local Ollama Model ───────────────────────────────────────────────────────
 
 def find_modelfile_path():
     candidates = [
@@ -104,7 +108,7 @@ def find_modelfile_path():
     return None
 
 def ensure_ollama_model():
-    """Ensure Ollama is installed and the local Gemma model is created from Modelfile."""
+    """Ensure Ollama is installed and the local model alias is created from Modelfile."""
     modelfile_path = find_modelfile_path()
     if not modelfile_path:
         raise RuntimeError("Missing Modelfile.txt in app folder.")
@@ -130,7 +134,7 @@ def ensure_ollama_model():
 
 
 def call_gemma_local(history):
-    """Call local Gemma through Ollama chat API."""
+    """Call the configured local model through Ollama chat API."""
     cpu_threads = max(1, (os.cpu_count() or 4))
     body = json.dumps({
         "model": OLLAMA_MODEL_NAME,
@@ -138,7 +142,7 @@ def call_gemma_local(history):
         "stream": False,
         "keep_alive": "30m",
         "options": {
-            "temperature": 0.7,
+            "temperature": 0.1,
             "num_predict": 1000,
             "num_thread": cpu_threads,
         },
@@ -161,7 +165,7 @@ def call_gemma_local(history):
 
 
 def call_gemma_local_stream(history, on_chunk):
-    """Call local Gemma through Ollama chat API with streamed chunks."""
+    """Call the configured local model through Ollama chat API with streamed chunks."""
     cpu_threads = max(1, (os.cpu_count() or 4))
     body = json.dumps({
         "model": OLLAMA_MODEL_NAME,
@@ -169,7 +173,7 @@ def call_gemma_local_stream(history, on_chunk):
         "stream": True,
         "keep_alive": "30m",
         "options": {
-            "temperature": 0.7,
+            "temperature": 0.1,
             "num_predict": 1000,
             "num_thread": cpu_threads,
         },
@@ -209,12 +213,90 @@ def call_gemma_local_stream(history, on_chunk):
 
 # ── System Actions ────────────────────────────────────────────────────────────
 
-def execute_action(action_str):
-    """Parse and execute [ACTION:type:value] strings."""
-    match = re.match(r'\[ACTION:(\w+):(.+?)\]', action_str.strip())
-    if not match:
+WINDOWS_APP_ALIASES = {
+    "whatsapp": [
+        ["cmd", "/c", "start", "", "shell:AppsFolder\\5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App"],
+        ["cmd", "/c", "start", "", "whatsapp:"],
+        ["cmd", "/c", "start", "", "WhatsApp"],
+    ],
+    "microsoft to do": [
+        ["cmd", "/c", "start", "", "shell:AppsFolder\\Microsoft.Todos_8wekyb3d8bbwe!App"],
+        ["cmd", "/c", "start", "", "ms-todo:"],
+    ],
+    "microsoft todo": [
+        ["cmd", "/c", "start", "", "shell:AppsFolder\\Microsoft.Todos_8wekyb3d8bbwe!App"],
+        ["cmd", "/c", "start", "", "ms-todo:"],
+    ],
+    "microdoft to do": [
+        ["cmd", "/c", "start", "", "shell:AppsFolder\\Microsoft.Todos_8wekyb3d8bbwe!App"],
+        ["cmd", "/c", "start", "", "ms-todo:"],
+    ],
+    "micosoft to do": [
+        ["cmd", "/c", "start", "", "shell:AppsFolder\\Microsoft.Todos_8wekyb3d8bbwe!App"],
+        ["cmd", "/c", "start", "", "ms-todo:"],
+    ],
+    "todo": [
+        ["cmd", "/c", "start", "", "ms-todo:"],
+    ],
+}
+
+
+def _launch_windows_app(target):
+    app_name = (target or "").strip()
+    normalized = re.sub(r"\s+", " ", app_name.lower())
+
+    if "to do" in normalized or "todo" in normalized or "microdoft" in normalized or "micosoft" in normalized:
+        # Microsoft To Do is most reliable via protocol / AppsFolder shell target.
+        todo_targets = [
+            "ms-todo:",
+            "shell:AppsFolder\\Microsoft.Todos_8wekyb3d8bbwe!App",
+        ]
+        for launch_target in todo_targets:
+            try:
+                os.startfile(launch_target)
+                return True
+            except Exception:
+                pass
+
+            try:
+                subprocess.Popen(["explorer.exe", launch_target])
+                return True
+            except Exception:
+                pass
+
+            try:
+                subprocess.Popen(["cmd", "/c", "start", "", launch_target])
+                return True
+            except Exception:
+                pass
+
+    attempts = WINDOWS_APP_ALIASES.get(normalized, [])
+
+    if not attempts and "whatsapp" in normalized:
+        attempts = WINDOWS_APP_ALIASES["whatsapp"]
+    if not attempts and ("to do" in normalized or "todo" in normalized or "microdoft" in normalized or "micosoft" in normalized):
+        attempts = WINDOWS_APP_ALIASES["microsoft to do"]
+
+    for cmd in attempts:
+        try:
+            subprocess.Popen(cmd)
+            return True
+        except Exception:
+            continue
+
+    try:
+        subprocess.Popen(app_name, shell=True)
+        return True
+    except Exception:
+        return False
+
+def execute_action(kind, value):
+    """Execute action kind/value produced by the model JSON response."""
+    kind = (kind or "").strip().lower()
+    value = (value or "").strip()
+    if not kind or kind == "none":
         return None
-    kind, value = match.group(1), match.group(2)
+
     sys_platform = platform.system()
 
     try:
@@ -244,7 +326,8 @@ def execute_action(action_str):
 
         elif kind == "open_app":
             if sys_platform == "Windows":
-                subprocess.Popen(value, shell=True)
+                if not _launch_windows_app(value):
+                    raise RuntimeError(f"Could not launch app '{value}'.")
             elif sys_platform == "Darwin":
                 subprocess.Popen(["open", "-a", value])
             else:
@@ -266,6 +349,55 @@ def execute_action(action_str):
         return f"Action failed: {e}"
 
     return None
+
+
+def parse_model_json_response(raw_text):
+    """Parse model output into normalized reply/action fields from strict JSON."""
+    if not raw_text:
+        raise RuntimeError("Model returned an empty response.")
+
+    text = raw_text.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
+
+    parsed = None
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            parsed = json.loads(text[start:end + 1])
+        else:
+            raise RuntimeError("Model output is not valid JSON.")
+
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Model JSON response must be an object.")
+
+    reply = parsed.get("reply", "")
+    if reply is None:
+        reply = ""
+    reply = str(reply).strip()
+
+    action = parsed.get("action", {})
+    kind = "none"
+    value = ""
+    if isinstance(action, dict):
+        kind = str(action.get("type", "none") or "none").strip().lower()
+        value = str(action.get("value", "") or "").strip()
+    else:
+        kind = str(parsed.get("action_type", "none") or "none").strip().lower()
+        value = str(parsed.get("action_value", "") or "").strip()
+
+    allowed = {"none", "open_url", "open_file", "open_folder", "open_app", "run_cmd", "search"}
+    if kind not in allowed:
+        kind = "none"
+
+    return {
+        "reply": reply,
+        "action_kind": kind,
+        "action_value": value,
+    }
 
 
 def sanitize_text_for_speech(text):
@@ -297,16 +429,35 @@ def sanitize_text_for_speech(text):
     return text
 
 
-def strip_leading_action_for_display(text):
-    """Hide action tags while streaming so the user only sees natural language."""
+def extract_partial_reply_for_display(text):
+    """Extract partial reply text from in-progress JSON output for streaming UI."""
     if not text:
         return ""
-    if text.startswith("[ACTION:"):
-        close_index = text.find("]")
-        if close_index == -1:
-            return ""
-        return text[close_index + 1:].lstrip()
-    return text
+
+    match = re.search(r'"reply"\s*:\s*"', text)
+    if not match:
+        return ""
+
+    chunk = text[match.end():]
+    out = []
+    escaped = False
+    for ch in chunk:
+        if escaped:
+            if ch == "n":
+                out.append("\n")
+            elif ch == "t":
+                out.append("\t")
+            else:
+                out.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == '"':
+            break
+        out.append(ch)
+    return "".join(out).strip()
 
 # ── Main App ──────────────────────────────────────────────────────────────────
 
@@ -365,7 +516,7 @@ class ARIAApp(ctk.CTk):
             ensure_ollama_model()
             self.modelfile_path = find_modelfile_path()
             self.ollama_ready = True
-            self.after(0, lambda: self.status_label.configure(text=" ● local gemma ready", text_color=COLORS["success"]))
+            self.after(0, lambda: self.status_label.configure(text=" ● local model ready", text_color=COLORS["success"]))
             threading.Thread(target=self._warm_model_once, daemon=True).start()
         except Exception as e:
             self.model_bootstrap_error = str(e)
@@ -380,13 +531,13 @@ class ARIAApp(ctk.CTk):
                 "model": OLLAMA_MODEL_NAME,
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": "Respond with exactly: ready"},
+                    {"role": "user", "content": "Return JSON for readiness check."},
                 ],
                 "stream": False,
                 "keep_alive": "30m",
                 "options": {
                     "temperature": 0.0,
-                    "num_predict": 8,
+                    "num_predict": 80,
                     "num_thread": max(1, (os.cpu_count() or 4)),
                 },
             }).encode()
@@ -483,12 +634,12 @@ class ARIAApp(ctk.CTk):
         ctk.CTkLabel(f, text=f"Modelfile: {(self.modelfile_path.name if self.modelfile_path else 'not found')}", font=("Courier", 11),
                  text_color=COLORS["muted"]).pack(anchor="w", padx=40)
 
-        ctk.CTkButton(f, text="Prepare Local Gemma →", width=320, height=44,
+        ctk.CTkButton(f, text="Prepare Local Model →", width=320, height=44,
                       fg_color=COLORS["accent"], hover_color="#6a5de8",
                       font=("Arial Black", 13), corner_radius=12,
                   command=lambda: threading.Thread(target=self._prepare_local_model, daemon=True).start()).pack(padx=40, pady=(16,0))
 
-        ctk.CTkLabel(f, text="This app runs Gemma through your local Ollama service.\nNo cloud API key is required.",
+        ctk.CTkLabel(f, text="This app runs your selected model through local Ollama.\nNo cloud API key is required.",
                      font=("Arial", 10), text_color=COLORS["muted"], justify="center").pack(pady=14)
 
         ctk.CTkButton(f, text="Open Ollama Guide", width=200, height=30,
@@ -574,7 +725,7 @@ class ARIAApp(ctk.CTk):
         self.ollama_ready = False
         self.model_warmed = False
         self.model_bootstrap_error = None
-        self.status_label.configure(text=" ● building local gemma...", text_color=COLORS["accent"])
+        self.status_label.configure(text=" ● building local model...", text_color=COLORS["accent"])
         threading.Thread(target=self._prepare_local_model, daemon=True).start()
 
     def _set_status(self, text, color):
@@ -835,7 +986,7 @@ $synth.Speak($text)
                      text_color=COLORS["text"]).pack(anchor="w", padx=24, pady=(4,6))
         ctk.CTkLabel(dlg, text=f"Modelfile: {(self.modelfile_path.name if self.modelfile_path else 'not found')}", font=("Courier", 11),
                      text_color=COLORS["muted"]).pack(anchor="w", padx=24)
-        ctk.CTkLabel(dlg, text="No API key needed. ARIA uses local Ollama + Gemma.",
+        ctk.CTkLabel(dlg, text="No API key needed. ARIA uses a local Ollama model.",
                      font=("Arial", 11), text_color=COLORS["muted"]).pack(anchor="w", padx=24, pady=(8,14))
         ctk.CTkLabel(dlg, text=f"Voice: {'Windows speech enabled' if self.voice_supported else 'Unavailable on this platform'}",
                      font=("Arial", 11), text_color=COLORS["muted"]).pack(anchor="w", padx=24, pady=(0,10))
@@ -880,7 +1031,7 @@ $synth.Speak($text)
             self._rebuild_local_model()
             dlg.destroy()
 
-        ctk.CTkButton(dlg, text="Rebuild Local Gemma Model", width=290, height=38,
+        ctk.CTkButton(dlg, text="Rebuild Local Model", width=290, height=38,
                       fg_color=COLORS["accent"], command=do_rebuild).pack(padx=24, pady=2)
         ctk.CTkButton(dlg, text="Clear Chat History", width=290, height=38,
                       fg_color="transparent", border_width=1,
@@ -972,7 +1123,7 @@ $synth.Speak($text)
 
     def _update_stream_text(self, full_text):
         self.stream_raw_text = full_text
-        shown_text = strip_leading_action_for_display(full_text)
+        shown_text = extract_partial_reply_for_display(full_text)
         if shown_text:
             self._set_status(" ● responding...", COLORS["accent"])
         if hasattr(self, "typing_label") and self.typing_label.winfo_exists():
@@ -1073,17 +1224,27 @@ $synth.Speak($text)
             self._set_status(" ● online", COLORS["success"])
             return
 
-        self._set_status(" ● local gemma ready", COLORS["success"])
+        self._set_status(" ● local model ready", COLORS["success"])
 
-        # Parse action
         action_result = None
-        action_match = re.match(r'^\[ACTION:(\w+):(.+?)\]\s*', reply)
-        if action_match:
-            action_tag = action_match.group(0).strip()
-            action_result = execute_action(action_tag)
-            reply = reply[len(action_match.group(0)):].strip()
+        try:
+            parsed = parse_model_json_response(reply)
+        except Exception as e:
+            self._add_error(f"Invalid JSON response from model: {e}")
+            self._add_aria_msg("I could not parse the model response. Please try again.")
+            return
+
+        reply = parsed["reply"]
+        action_kind = parsed["action_kind"]
+        action_value = parsed["action_value"]
+
+        if action_kind != "none":
+            action_result = execute_action(action_kind, action_value)
             if not reply and action_result:
                 reply = "Done."
+
+        if not reply:
+            reply = "Done."
 
         self.history.append({"role": "assistant", "content": reply})
         self._add_aria_msg(reply, action_result)
